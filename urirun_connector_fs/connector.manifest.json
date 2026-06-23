@@ -33,8 +33,8 @@
     "github": "https://github.com/if-uri"
   },
   "routes": [
-    "fs://host/duplicates/query/find",
-    "fs://host/duplicates/command/move"
+    "fs://host/duplicates/command/move",
+    "fs://host/duplicates/query/find"
   ],
   "useCases": [
     "Find byte-identical duplicate files in a folder tree.",
@@ -64,5 +64,8 @@
   "install": {
     "mode": "urirun-extra",
     "pipSpec": "urirun-connector-fs @ git+https://github.com/if-uri/urirun-connector-fs.git@v0.1.0"
-  }
+  },
+  "adapterKinds": [
+    "local-function"
+  ]
 }
