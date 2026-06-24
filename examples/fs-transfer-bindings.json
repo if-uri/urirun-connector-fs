@@ -1,0 +1,21 @@
+{
+  "version": "urirun.bindings.v2",
+  "bindings": {
+    "fs://host/file/query/read-b64": {
+      "uri": "fs://host/file/query/read-b64",
+      "kind": "local-function",
+      "adapter": "local-function",
+      "python": {"type": "python", "module": "fs_transfer", "export": "read_b64"},
+      "policy": {"allowExecute": true},
+      "meta": {"connector": "fs", "label": "Read one file as base64"}
+    },
+    "fs://host/file/command/write-b64": {
+      "uri": "fs://host/file/command/write-b64",
+      "kind": "local-function",
+      "adapter": "local-function",
+      "python": {"type": "python", "module": "fs_transfer", "export": "write_b64"},
+      "policy": {"allowExecute": true},
+      "meta": {"connector": "fs", "label": "Write one base64 file"}
+    }
+  }
+}
