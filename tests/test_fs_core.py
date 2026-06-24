@@ -1,4 +1,5 @@
 """Offline tests for the fs connector: sha256 dedup, perceptual (optional), move."""
+import base64
 import os
 import pytest
 import urirun_connector_fs.core as c
@@ -6,7 +7,12 @@ import urirun_connector_fs.core as c
 
 def test_bindings_valid():
     b = c.urirun_bindings()
-    assert set(b["bindings"]) == {"fs://host/duplicates/query/find", "fs://host/duplicates/command/move"}
+    assert set(b["bindings"]) == {
+        "fs://host/duplicates/query/find",
+        "fs://host/duplicates/command/move",
+        "fs://host/file/query/read-b64",
+        "fs://host/file/command/write-b64",
+    }
 
 
 def test_sha256_finds_exact_duplicates(tmp_path):
@@ -55,6 +61,35 @@ def test_move_quarantines_extras(tmp_path):
     assert r["movedCount"] == 1
     assert (tmp_path / "a.txt").exists()             # keeper stays
     assert (tmp_path / "_duplicates").exists()       # extra quarantined
+
+
+def test_read_and_write_b64_round_trip(tmp_path):
+    payload = b"%PDF-1.4\nsmall invoice\n"
+    encoded = base64.b64encode(payload).decode("ascii")
+    target = tmp_path / "Downloads" / "scan.pdf"
+
+    written = c.write_b64(path=str(target), bytes_b64=encoded)
+    assert written["ok"] is True
+    assert written["path"] == str(target)
+    assert target.read_bytes() == payload
+
+    read = c.read_b64(path=str(target))
+    assert read["ok"] is True
+    assert read["bytes_b64"] == encoded
+    assert base64.b64decode(read["bytes_b64"]) == payload
+
+
+def test_write_b64_does_not_overwrite_by_default(tmp_path):
+    target = tmp_path / "scan.pdf"
+    target.write_bytes(b"first")
+
+    written = c.write_b64(path=str(target), bytes_b64=base64.b64encode(b"second").decode("ascii"))
+
+    assert written["ok"] is True
+    assert written["renamed"] is True
+    assert target.read_bytes() == b"first"
+    assert os.path.basename(written["path"]) == "scan_1.pdf"
+    assert (tmp_path / "scan_1.pdf").read_bytes() == b"second"
 
 
 def test_perceptual_mode_needs_images_or_reports_cleanly(tmp_path):
