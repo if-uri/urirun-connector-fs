@@ -108,12 +108,40 @@ def write_b64(path: str = "", bytes_b64: str = "", overwrite: bool = False,
         data = base64.b64decode(bytes_b64.encode("ascii"), validate=True)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"invalid base64 payload: {exc}"}
+    # REVERSIBILITY CONTRACT: snapshot the prior content (to the resolution of the file bytes)
+    # BEFORE writing, so the return carries a concrete inverse — restore-previous when this write
+    # replaced an existing file, otherwise delete the file this write created.
+    prior_b64 = base64.b64encode(final.read_bytes()).decode("ascii") if final.exists() else None
     tmp = final.with_name(f".{final.name}.tmp-{os.getpid()}-{int(time.time() * 1000)}")
     tmp.write_bytes(data)
     tmp.replace(final)
+    inverse = ({"uri": "fs://host/file/command/write-b64",
+                "args": {"path": str(final), "bytes_b64": prior_b64, "overwrite": True}}
+               if prior_b64 is not None
+               else {"uri": "fs://host/file/command/delete", "args": {"path": str(final)}})
     return {"ok": True, "connector": CONNECTOR_ID, "path": str(final), "requestedPath": str(target),
             "overwritten": bool(overwrite and final == target), "renamed": final != target,
-            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "inverse": inverse}
+
+
+@FS.handler("file/command/delete", isolated=True,
+            meta={"label": "Delete one file (reversible: inverse restores the bytes)", "cliAlias": "delete"})
+def delete(path: str = "") -> dict[str, Any]:
+    """Delete ``path``. Reversible per the engine contract: the bytes are snapshotted BEFORE
+    removal so the returned ``inverse`` re-writes them — a delete that ran inside a flow can be
+    rolled back. Missing file is a no-op failure (nothing to undo)."""
+    if not path:
+        return {"ok": False, "error": "path is required"}
+    target = _expand_path(path)
+    if not target.is_file():
+        return {"ok": False, "error": f"not a file: {target}"}
+    data = target.read_bytes()                       # snapshot before removal
+    target.unlink()
+    return {"ok": True, "connector": CONNECTOR_ID, "path": str(target), "bytes": len(data),
+            "inverse": {"uri": "fs://host/file/command/write-b64",
+                        "args": {"path": str(target),
+                                 "bytes_b64": base64.b64encode(data).decode("ascii"),
+                                 "overwrite": True}}}
 
 
 def _phash(path: str) -> str | None:

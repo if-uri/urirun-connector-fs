@@ -12,6 +12,7 @@ def test_bindings_valid():
         "fs://host/duplicates/command/move",
         "fs://host/file/query/read-b64",
         "fs://host/file/command/write-b64",
+        "fs://host/file/command/delete",
     }
 
 
@@ -101,3 +102,66 @@ def test_perceptual_mode_needs_images_or_reports_cleanly(tmp_path):
     img.save(tmp_path / "x_copy.png")
     r = c.find(root=str(tmp_path), mode="perceptual", threshold=5)
     assert r["ok"] and r["duplicateGroups"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# REVERSIBILITY: the fs connector ADOPTS the engine contract (mutation returns
+# `inverse`). Drive a real flow with the connector-agnostic ReversibleProcess and
+# prove files on disk return to their prior state — write⟂restore/delete, delete⟂write.
+# --------------------------------------------------------------------------- #
+import sys, pathlib  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "urirun/adapters/python"))
+
+
+def test_write_returns_delete_inverse_for_new_file(tmp_path):
+    p = tmp_path / "new.txt"
+    r = c.write_b64(path=str(p), bytes_b64=base64.b64encode(b"hi").decode(), overwrite=True)
+    assert r["ok"] and r["inverse"]["uri"].endswith("file/command/delete")
+    assert r["inverse"]["args"]["path"] == str(p)
+
+
+def test_overwrite_returns_restore_inverse(tmp_path):
+    p = tmp_path / "f.txt"
+    p.write_bytes(b"OLD")
+    r = c.write_b64(path=str(p), bytes_b64=base64.b64encode(b"NEW").decode(), overwrite=True)
+    assert r["inverse"]["uri"].endswith("file/command/write-b64")
+    assert base64.b64decode(r["inverse"]["args"]["bytes_b64"]) == b"OLD"   # restores the prior bytes
+
+
+def test_end_to_end_flow_rollback_restores_disk(tmp_path):
+    from urirun.node.reversible import (CallableTransport, ReversibleProcess,
+                                        Transition, Action, ledger_from_execution, path_of)
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    a.write_bytes(b"A0")                                    # a pre-exists; b is new
+
+    # transport routing fs://host/file/command/* to the real connector handlers, in-process
+    def call(uri, payload):
+        p = path_of(uri)
+        if p == "file/command/write-b64":
+            return c.write_b64(**payload)
+        if p == "file/command/delete":
+            return c.delete(**payload)
+        return {"ok": False, "error": f"route {p}"}
+    proc = ReversibleProcess(CallableTransport(call))
+
+    # a "flow" that mutates the disk, collecting each step's inverse (as execute_flow would)
+    steps = [
+        ("s1", "fs://host/file/command/write-b64",
+         {"path": str(a), "bytes_b64": base64.b64encode(b"A1").decode(), "overwrite": True}),
+        ("s2", "fs://host/file/command/write-b64",
+         {"path": str(b), "bytes_b64": base64.b64encode(b"B1").decode(), "overwrite": True}),
+    ]
+    timeline, results = [], {}
+    for sid, uri, args in steps:
+        res = call(uri, args)
+        timeline.append({"id": sid, "uri": uri, "ok": True})
+        results[sid] = {"ok": True, "result": {"value": res}}
+    assert a.read_bytes() == b"A1" and b.read_bytes() == b"B1"   # flow mutated the disk
+
+    ledger = ledger_from_execution({"ok": True, "timeline": timeline, "results": results})
+    assert [path_of(t.inverse.uri) for t in ledger] == ["file/command/write-b64", "file/command/delete"]
+
+    rb = proc.rollback_flow(None, ledger)                  # LIFO: delete b, restore a
+    assert rb["ok"]
+    assert a.read_bytes() == b"A0"                          # a restored to its prior content
+    assert not b.exists()                                  # b (created by the flow) removed
