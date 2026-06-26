@@ -37,6 +37,7 @@
   "routes": [
     "fs://host/duplicates/command/move",
     "fs://host/duplicates/query/find",
+    "fs://host/file/command/delete",
     "fs://host/file/command/write-b64",
     "fs://host/file/query/read-b64"
   ],
