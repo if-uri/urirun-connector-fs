@@ -13,10 +13,18 @@ import base64
 import urirun_connector_fs.core as core
 from urirun_connector_fs.contracts import CONTRACTS
 from urirun_connectors_toolkit.contract_gate import conform, envelope_violation
+from urirun_connectors_toolkit.contract_lint import lint_handler_signatures
 
 
 def test_contracts_conform():
     conform(CONTRACTS)
+
+
+def test_signatures_bound_to_contract():
+    """Every contract.inp field must exist in the live handler signature with a compatible type
+    (the input shape can't be hand-edited away from the contract)."""
+    problems = lint_handler_signatures(CONTRACTS, core.urirun_bindings())
+    assert not problems, "contract<->signature drift:\n" + "\n".join(problems)
 
 
 def test_every_route_has_a_contract():
