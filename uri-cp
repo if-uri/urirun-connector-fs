@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+# Author: Tom Sapletta · Part of the ifURI solution.
+"""uri-cp — łatwe, szybkie kopiowanie plików i katalogów host↔node przez mesh urirun.
+
+    uri-cp SRC            NODE:DEST     # push: plik lub KATALOG na node
+    uri-cp NODE:SRC       DEST          # pull: plik z node na host
+    -i, --identity ~/.ssh/id_ed25519    # klucz SSH (node z --manage/deploy-auth)
+    -t, --token TOKEN                    # albo token admin
+        --node-url NAME=URL             # gdy node nie jest w host.db
+
+Bez ręcznego base64/tar/scp. Pliki: fs write-b64/read-b64. KATALOGI: jeden strzał —
+host pakuje folder do tar.gz, wysyła jako jeden base64, node rozpakowuje przez
+fs://…/archive/command/unpack-b64 (bez per-plik, bez shell:// tar).
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import io
+import os
+import sys
+import tarfile
+
+
+def _split(spec: str):
+    """`node:/path` → ('node', '/path'); `/path` → (None, '/path'). Chroni ścieżki
+    Windowsowe/absolutne (dwukropek tylko jako separator nazwy node'a na początku)."""
+    if ":" in spec:
+        head, _, tail = spec.partition(":")
+        if head and "/" not in head and os.sep not in head:
+            return head, tail
+    return None, spec
+
+
+def _client(node: str, identity: str | None, token: str | None, node_url: str | None):
+    from urirun.host.node_cli import host_config_for_args, node_url as resolve_url  # type: ignore
+    from urirun.node.client import NodeClient
+    import argparse as _a
+    ns = _a.Namespace(config=None, node_url=([node_url] if node_url else None))
+    try:
+        url = resolve_url(host_config_for_args(ns), node)
+    except Exception:
+        url = node_url.split("=", 1)[1] if node_url and "=" in node_url else node
+    ident = os.path.expanduser(identity) if identity and not token else None
+    return NodeClient(url, token=token, identity=ident)
+
+
+def _run(client, uri: str, payload: dict) -> dict:
+    env = client.run(uri, payload, timeout=300)
+    val = (env.get("result") or {}).get("value")
+    if not isinstance(val, dict):
+        val = env.get("result") if isinstance(env.get("result"), dict) else {}
+    ok = env.get("ok") and val.get("ok", True)
+    if not ok:
+        err = (val.get("error") if isinstance(val, dict) else None) or env.get("error") or env
+        raise SystemExit(f"FAIL {uri}: {err}")
+    return val
+
+
+def push(client, src: str, dest: str) -> None:
+    if os.path.isdir(src):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name in sorted(os.listdir(src)):
+                tar.add(os.path.join(src, name), arcname=name)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        val = _run(client, "fs://host/archive/command/unpack-b64", {"dest": dest, "bytes_b64": b64})
+        print(f"✓ katalog {src} → {client.name}:{val.get('dest')}  ({val.get('count')} plików, {len(b64)//1024} KB b64)")
+    else:
+        with open(src, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode("ascii")
+        val = _run(client, "fs://host/file/command/write-b64",
+                   {"path": dest, "bytes_b64": b64, "overwrite": True})
+        print(f"✓ plik {src} → {client.name}:{val.get('path')}  ({val.get('bytes')} B)")
+
+
+def pull(client, src: str, dest: str) -> None:
+    val = _run(client, "fs://host/file/query/read-b64", {"path": src})
+    data = base64.b64decode((val.get("bytes_b64") or "").encode("ascii"))
+    out = os.path.join(dest, os.path.basename(src)) if os.path.isdir(dest) else dest
+    with open(out, "wb") as fh:
+        fh.write(data)
+    print(f"✓ pull {client.name}:{src} → {out}  ({len(data)} B)")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="uri-cp", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("src")
+    ap.add_argument("dest")
+    ap.add_argument("-i", "--identity", default=os.environ.get("URIRUN_IDENTITY", "~/.ssh/id_ed25519"))
+    ap.add_argument("-t", "--token", default=os.environ.get("URIRUN_NODE_TOKEN"))
+    ap.add_argument("--node-url", default=None, help="NAME=URL gdy node nie jest w host.db")
+    args = ap.parse_args()
+
+    src_node, src_path = _split(args.src)
+    dest_node, dest_path = _split(args.dest)
+    if src_node and dest_node:
+        ap.error("kopiowanie node→node nieobsługiwane (przejdź przez host)")
+    if not src_node and not dest_node:
+        ap.error("jedna strona musi być NODE:ścieżka (push albo pull)")
+
+    if dest_node:  # push host → node
+        client = _client(dest_node, args.identity, args.token, args.node_url)
+        push(client, src_path, dest_path)
+    else:  # pull node → host
+        client = _client(src_node, args.identity, args.token, args.node_url)
+        pull(client, src_path, dest_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

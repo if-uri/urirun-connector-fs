@@ -124,6 +124,53 @@ def write_b64(path: str = "", bytes_b64: str = "", overwrite: bool = False,
             "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "inverse": inverse}
 
 
+@FS.handler("archive/command/unpack-b64", isolated=True,
+            meta={"label": "Extract a base64 tar.gz into a directory", "cliAlias": "unpack-b64"})
+def unpack_b64(dest: str = "", bytes_b64: str = "", strip_components: int = 0) -> dict[str, Any]:
+    """Extract a base64 tar.gz into ``dest`` (created if missing). One-shot DIRECTORY copy over
+    the mesh: the host tars a folder, sends it as one base64 payload, the node unpacks it here —
+    no per-file writes, no shell:// tar. Members are constrained to ``dest`` (path-traversal is
+    rejected). Returns the written paths so the caller can verify the copy."""
+    import io
+    import tarfile
+    if not dest:
+        return {"ok": False, "error": "dest is required"}
+    if not bytes_b64:
+        return {"ok": False, "error": "bytes_b64 is required"}
+    root = _expand_path(dest)
+    try:
+        data = base64.b64decode(bytes_b64.encode("ascii"), validate=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"invalid base64 payload: {exc}"}
+    root.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                parts = member.name.split("/")
+                if strip_components:
+                    parts = parts[strip_components:]
+                rel = "/".join(p for p in parts if p and p != "..")
+                if not rel:
+                    continue
+                target = (root / rel).resolve()
+                if os.path.commonpath([str(target), str(root)]) != str(root):
+                    return {"ok": False, "error": f"unsafe path in archive: {member.name}"}
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tar.extractfile(member)
+                if src is None:
+                    continue
+                target.write_bytes(src.read())
+                written.append(str(target))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"unpack failed: {exc}"}
+    return {"ok": True, "connector": CONNECTOR_ID, "dest": str(root),
+            "files": written, "count": len(written)}
+
+
 @FS.handler("file/command/delete", isolated=True,
             meta={"label": "Delete one file (reversible: inverse restores the bytes)", "cliAlias": "delete"})
 def delete(path: str = "") -> dict[str, Any]:
