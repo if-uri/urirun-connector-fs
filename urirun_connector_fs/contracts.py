@@ -58,6 +58,19 @@ CONTRACTS: dict[str, Contract] = {
                                                         "bytes_b64": "aGVsbG8gd29ybGQ=", "overwrite": True}}}},
         )),
 
+    # One-shot base64 tar.gz → directory extract (path-traversal constrained). Not declared
+    # reversible: undo would require deleting exactly the members written, which we don't snapshot.
+    "fs://host/archive/command/unpack-b64": Contract(
+        version="v1", effect="command", reversible=False,
+        inp={"dest": "str", "bytes_b64": "str", "strip_components": "?int"},
+        out={"ok": "const:true", "connector": "const:fs", "dest": "str",
+             "files": "list", "count": "int"},
+        examples=(
+            {"payload": {"dest": "/tmp/out", "bytes_b64": "H4sIAAAA..."},
+             "result": {"ok": True, "connector": "fs", "dest": "/tmp/out",
+                        "files": ["/tmp/out/a.txt"], "count": 1}},
+        )),
+
     "fs://host/duplicates/query/find": Contract(
         version="v1", effect="query",
         inp={"root": "str", "extensions": "?list", "min_size": "?int", "mode": "?str",
