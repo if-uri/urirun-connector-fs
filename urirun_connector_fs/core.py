@@ -18,7 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import urirun
+from . import _urirun_compat as urirun
 
 CONNECTOR_ID = "fs"
 FS = urirun.connector(CONNECTOR_ID, scheme="fs", target="host", meta={"label": "Filesystem duplicates"})

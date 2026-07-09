@@ -1,7 +1,108 @@
 name: ci
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
-  ci:
-    uses: if-uri/urirun/.github/workflows/connector-ci.yml@main
-    with:
-      lang: python
+  connector-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout urirun-connector-fs
+        uses: actions/checkout@v4
+        with:
+          path: urirun-connector-fs
+
+      - name: Checkout urirun
+        uses: actions/checkout@v4
+        with:
+          repository: if-uri/urirun
+          path: _deps/urirun
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install urirun and current connector from source
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "./_deps/urirun/adapters/python"
+          python -m pip install -e "./urirun-connector-fs[test]"
+
+      - name: Verify connector import and bindings
+        working-directory: urirun-connector-fs
+        run: |
+          python - <<'PY'
+          import json
+
+          from urirun_connector_fs.core import urirun_bindings
+
+          bindings = urirun_bindings()
+          assert "fs://host/duplicates/query/find" in bindings["bindings"]
+
+          text = json.dumps(bindings)
+          forbidden = [
+              "kvm://",
+              "browser://",
+              "http-check://",
+              "router://",
+              "mqtt://",
+              "github://",
+          ]
+          for marker in forbidden:
+              assert marker not in text, f"Unexpected non-FS connector route found: {marker}"
+
+          print("FS connector import and bindings are isolated")
+          PY
+
+      - name: Build isolated FS registry and run safe duplicate route
+        run: |
+          mkdir -p .urirun
+          mkdir -p "$RUNNER_TEMP/fs-smoke"
+          printf 'same contents\n' > "$RUNNER_TEMP/fs-smoke/a.txt"
+          printf 'same contents\n' > "$RUNNER_TEMP/fs-smoke/b.txt"
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from urirun_connector_fs.core import urirun_bindings
+
+          bindings = urirun_bindings()
+          text = json.dumps(bindings)
+          assert "fs://host/duplicates/query/find" in text, "FS duplicate route missing"
+          Path(".urirun/fs.bindings.v2.json").write_text(
+              json.dumps(bindings, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+
+          urirun compile .urirun/fs.bindings.v2.json --out .urirun/fs.registry.json
+
+          urirun run \
+            'fs://host/duplicates/query/find' \
+            .urirun/fs.registry.json \
+            --execute \
+            --allow 'fs://**' \
+            --payload "{\"root\":\"$RUNNER_TEMP/fs-smoke\",\"mode\":\"sha256\",\"min_size\":1}" \
+            | tee run-response.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          response = json.loads(Path("run-response.json").read_text(encoding="utf-8"))
+          result = response.get("result")
+          value = result.get("value", result) if isinstance(result, dict) else result
+          assert response.get("ok") is True, response
+          assert isinstance(value, dict), response
+          assert value.get("ok") is True, response
+          assert value.get("connector") == "fs", response
+          assert value.get("duplicateGroups", 0) >= 1, response
+          print("FS duplicate route through urirun run OK")
+          PY
